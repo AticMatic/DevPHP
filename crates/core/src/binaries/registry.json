@@ -1,0 +1,27 @@
+{
+  "php": {
+    "8.3": {
+      "windows-x86_64": {
+        "strategy": "download",
+        "url": "https://windows.php.net/downloads/releases/php-8.3.14-nts-Win32-vs16-x64.zip",
+        "type": "zip"
+      },
+      "macos-aarch64": {
+        "strategy": "system",
+        "install_hint": "brew install php"
+      },
+      "macos-x86_64": {
+        "strategy": "system",
+        "install_hint": "brew install php"
+      },
+      "linux-x86_64": {
+        "strategy": "system",
+        "install_hint": "sudo apt install php-cli"
+      },
+      "linux-aarch64": {
+        "strategy": "system",
+        "install_hint": "sudo apt install php-cli"
+      }
+    }
+  }
+}
