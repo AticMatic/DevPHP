@@ -6,7 +6,7 @@ use devphp_core::services::php_service::ServiceStatus;
 use devphp_core::services::service_registry::ServiceRegistry;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt};
 
 struct AppState {
     registry: Arc<ServiceRegistry>,
@@ -47,10 +47,21 @@ async fn get_service_status(state: State<'_, AppState>) -> Result<Vec<ServiceSta
     Ok(state.registry.status_all())
 }
 
+/// Properly tail the log file using seek-offset tracking.
+/// Seeks to the beginning on start (to catch startup messages), then
+/// tracks position to only emit new lines on each poll cycle.
 async fn stream_log_file(app: AppHandle, log_path: std::path::PathBuf) {
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Wait for the process to start writing the log file
+    let mut attempts = 0;
+    while !log_path.exists() && attempts < 30 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        attempts += 1;
+    }
+
+    let mut offset: u64 = 0;
 
     loop {
+        // Open the file fresh each cycle to handle log rotation
         let file = match tokio::fs::File::open(&log_path).await {
             Ok(f) => f,
             Err(_) => {
@@ -59,18 +70,45 @@ async fn stream_log_file(app: AppHandle, log_path: std::path::PathBuf) {
             }
         };
 
-        // Seek to end to only get new lines
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
+        // Get file size
+        let metadata = match file.metadata().await {
+            Ok(m) => m,
+            Err(_) => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                continue;
+            }
+        };
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = app.emit("log-line", &line);
+        let file_len = metadata.len();
+
+        // If file was truncated (log rotation), reset offset
+        if file_len < offset {
+            offset = 0;
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        // Only read if there's new content
+        if file_len > offset {
+            let mut file = file;
+            if let Ok(_) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                let reader = tokio::io::BufReader::new(file);
+                let mut lines = reader.lines();
+
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if !line.is_empty() {
+                        let _ = app.emit("log-line", &line);
+                    }
+                }
+
+                // Update offset to current file size
+                offset = file_len;
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
     }
 }
 
+/// Watchdog: periodically check process health and emit status events.
 async fn run_watchdog(app: AppHandle, registry: Arc<ServiceRegistry>) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
